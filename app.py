@@ -8,9 +8,7 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_master():
     try:
-        # ttl=0 を追加してキャッシュを無効化し、常に最新を読み込む
         df = conn.read(worksheet="master", ttl=0)
-        # 空の列が含まれるのを防ぐため、必要な列だけを抽出
         cols = ["カテゴリー", "アイテム名", "単位①容量", "集計単位①", "入力単位②", "集計単位②", "換算数値"]
         if not df.empty:
             return df[cols].dropna(subset=["アイテム名"])
@@ -43,19 +41,19 @@ CATEGORIES = [
 ]
 
 # --- 2. サイドバーメニュー ---
-st.sidebar.title("🚚 在庫・車両管理")
+st.sidebar.title("CV貸し借り入力")
 page = st.sidebar.radio(
-    "移動先を選択", 
-    ["積み込み", "追加", "積み下ろし", "ロス", "最終集計", "マスター管理", "データ履歴削除"],
+    "", # 「移動先を選択」を空欄に変更
+    ["積込", "棚卸", "積み下ろし", "ロス", "貸し借り入力一覧", "商品マスター", "データ履歴削除"],
     key="nav_menu"
 )
 
 st.title(f"【{page}】")
 
 # --- 3. 入力画面 ---
-if page in ["積み込み", "追加", "積み下ろし", "ロス"]:
+if page in ["積込", "棚卸", "積み下ろし", "ロス"]:
     if df_master.empty:
-        st.warning("先にマスター管理でアイテムを登録してください。データが反映されない場合はページを再読み込みしてください。")
+        st.warning("先に商品マスターでアイテムを登録してください。")
     else:
         c_top1, c_top2 = st.columns(2)
         with c_top1: input_date = st.date_input("日付", value=date.today(), key=f"d_{page}")
@@ -70,7 +68,13 @@ if page in ["積み込み", "追加", "積み下ろし", "ロス"]:
 
         input_list = []
         for cat in df_master["カテゴリー"].unique():
-            st.markdown(f"### {cat}")
+            # カテゴリー見出しのデザイン（落ち着いた青色）
+            st.markdown(f"""
+                <div style="background-color: #4682B4; color: white; padding: 5px 15px; border-radius: 5px; margin-top: 20px; margin-bottom: 10px;">
+                    <b style="font-size: 1.1em;">{cat}</b>
+                </div>
+                """, unsafe_allow_html=True)
+            
             df_cat = df_master[df_master["カテゴリー"] == cat]
             for i, row in df_cat.iterrows():
                 item = row["アイテム名"]
@@ -79,23 +83,30 @@ if page in ["積み込み", "追加", "積み下ろし", "ロス"]:
                 with st.container():
                     c1, c2, c3, c4 = st.columns([1.2, 1, 1, 0.8], vertical_alignment="center")
                     with c1: st.write(f"**{item}**")
-                    with c2: v1 = st.number_input(f"{u1_label}", min_value=0, step=1, key=f"u1_{page}_{item}", label_visibility="collapsed")
-                    with c3: v2 = st.number_input(f"{u2_label}", min_value=0.0, step=0.1, key=f"u2_{page}_{item}", label_visibility="collapsed")
+                    with c2:
+                        # ＋ーボタンを消すために st.text_input を数値型として運用、横に単位を表示
+                        v1_str = st.text_input(f"u1_{item}", value="0", key=f"u1_{page}_{item}", label_visibility="collapsed")
+                        st.caption(f" {u1_label}") # 入力欄の下/横に単位を表示
+                        v1 = int(v1_str) if v1_str.isdigit() else 0
+                    with c3:
+                        v2_str = st.text_input(f"u2_{item}", value="0", key=f"u2_{page}_{item}", label_visibility="collapsed")
+                        st.caption(f" {u2_label}")
+                        try: v2 = float(v2_str)
+                        except: v2 = 0.0
                     with c4:
                         if st.button("登録", key=f"btn_{page}_{item}", use_container_width=True):
                             if not car_id: st.error("車両番号入力")
                             elif v1 > 0 or v2 > 0:
-                                # 列名を直接指定して作成
                                 new_row = pd.DataFrame([[input_date, car_id, page, item, v1, v2]], 
                                                        columns=["日付", "車両番号", "種別", "アイテム名", "単位①数値", "単位②数値"])
                                 updated_log = pd.concat([df_log, new_row], ignore_index=True)
                                 conn.update(worksheet="log", data=updated_log)
-                                st.success(f"{item} 保存")
+                                st.success(f"保存完了")
                                 st.rerun()
                     input_list.append({"item": item, "v1": v1, "v2": v2})
 
         st.divider()
-        if st.button(f"一括で{page}する", use_container_width=True, type="primary"):
+        if st.button(f"一括で登録する", use_container_width=True, type="primary"):
             if not car_id: st.error("車両番号を入力してください")
             else:
                 new_rows = [[input_date, car_id, page, d["item"], d["v1"], d["v2"]] for d in input_list if d["v1"] > 0 or d["v2"] > 0]
@@ -106,8 +117,8 @@ if page in ["積み込み", "追加", "積み下ろし", "ロス"]:
                     st.success("一括保存完了")
                     st.rerun()
 
-# --- 4. 最終集計 ---
-elif page == "最終集計":
+# --- 4. 貸し借り入力一覧 ---
+elif page == "貸し借り入力一覧":
     st.header("📊 集計検索")
     if not df_log.empty:
         c1, c2, c3 = st.columns([1, 1, 1])
@@ -124,14 +135,15 @@ elif page == "最終集計":
         df_f = df_log.loc[mask]
 
         if not df_f.empty:
-            # マスターを再読み込みして結合
             current_master = load_master()
             df_c = pd.merge(df_f, current_master, on="アイテム名")
             
             def calc_stock_pcs(row):
                 conv_unit2 = row["単位②数値"] / row["換算数値"]
                 total_pcs = (row["単位①数値"] * row["単位①容量"]) + conv_unit2
-                return total_pcs if row["種別"] in ["積み込み", "追加"] else -total_pcs
+                # 種別名称変更に対応
+                pos_list = ["積込", "棚卸", "追加"]
+                return total_pcs if row["種別"] in pos_list else -total_pcs
             
             df_c["個数差分"] = df_c.apply(calc_stock_pcs, axis=1)
             res = df_c.groupby(["カテゴリー", "アイテム名"]).agg({
@@ -150,11 +162,13 @@ elif page == "最終集計":
             for cat in res["カテゴリー"].unique():
                 st.subheader(f"📁 {cat}")
                 st.table(res[res["カテゴリー"] == cat][["アイテム名", "現在在庫/差分"]])
+        else:
+            st.warning("データがありません")
     else:
         st.info("データがありません")
 
-# --- 5. マスター管理 ---
-elif page == "マスター管理":
+# --- 5. 商品マスター ---
+elif page == "商品マスター":
     st.header("⚙️ マスター設定")
     with st.form("m_form"):
         m_cat = st.selectbox("カテゴリー", CATEGORIES)
@@ -169,12 +183,11 @@ elif page == "マスター管理":
         
         if st.form_submit_button("マスター登録"):
             if m_name:
-                # 列名を直接指定して作成
                 new_m = pd.DataFrame([[m_cat, m_name, m_cap, m_u1, m_u2_in, m_u2_out, m_conv]], 
                                      columns=["カテゴリー", "アイテム名", "単位①容量", "集計単位①", "入力単位②", "集計単位②", "換算数値"])
                 updated_master = pd.concat([df_master, new_m], ignore_index=True)
                 conn.update(worksheet="master", data=updated_master)
-                st.success(f"{m_name}を登録しました。反映されない場合はリロードしてください。")
+                st.success(f"登録完了")
                 st.rerun()
 
     st.divider()
