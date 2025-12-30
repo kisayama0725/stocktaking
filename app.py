@@ -22,10 +22,9 @@ def load_master_cached():
 def load_log_cached():
     try:
         df = conn.read(worksheet="log", ttl=0)
-        # 新しい列（積込店舗、基幹店舗）を含む列構成
         cols = ["日付", "車両番号", "積込店舗", "基幹店舗", "種別", "アイテム名", "単位①数値", "単位②数値"]
         if not df.empty:
-            # 読み込み時に不足している列があれば補完
+            # 不足列の補完
             for c in cols:
                 if c not in df.columns:
                     df[c] = ""
@@ -57,18 +56,17 @@ CATEGORIES = [
 st.sidebar.title("CV貸し借り入力")
 page = st.sidebar.radio(
     "", 
-    ["積込", "棚卸", "積み下ろし", "ロス", "貸し借り入力一覧", "商品マスター", "データ履歴削除"],
+    ["積込", "追加", "積み下ろし", "ロス", "貸し借り入力一覧", "商品マスター", "データ履歴削除"],
     key="nav_menu"
 )
 
 st.title(f"【{page}】")
 
 # --- 3. 入力画面 ---
-if page in ["積込", "棚卸", "積み下ろし", "ロス"]:
+if page in ["積込", "追加", "積み下ろし", "ロス"]:
     if df_master.empty:
         st.warning("商品マスターを読み込み中です... 表示されない場合は「最新データに更新」を押してください。")
     else:
-        # 入力項目（店舗情報の追加）
         c_top1, c_top2 = st.columns(2)
         with c_top1: input_date = st.date_input("日付", value=date.today(), key=f"d_{page}")
         with c_top2: car_id = st.text_input("車両番号", key=f"s_{page}")
@@ -167,7 +165,8 @@ elif page == "貸し借り入力一覧":
             def calc_stock_pcs(row):
                 conv_unit2 = row["単位②数値"] / row["換算数値"]
                 total_pcs = (row["単位①数値"] * row["単位①容量"]) + conv_unit2
-                pos_list = ["積込", "棚卸", "追加"]
+                # 「積込」と「追加」をプラスとして計算
+                pos_list = ["積込", "追加"]
                 return total_pcs if row["種別"] in pos_list else -total_pcs
             
             df_c["個数差分"] = df_c.apply(calc_stock_pcs, axis=1)
@@ -193,7 +192,6 @@ elif page == "貸し借り入力一覧":
         st.info("データがありません")
 
 # --- 5. 商品マスター ---
-# (中身は変わらないため、そのまま使用してください)
 elif page == "商品マスター":
     st.header("⚙️ マスター設定")
     with st.form("m_form"):
