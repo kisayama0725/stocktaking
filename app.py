@@ -1,11 +1,32 @@
 import streamlit as st
 import pandas as pd
-import os
+from streamlit_gsheets import GSheetsConnection
 from datetime import datetime, date
 
-# --- 1. 設定とデータの読み込み ---
-MASTER_FILE = "master.csv"
-LOG_FILE = "inventory_log.csv"
+# --- 1. スプレッドシートへの接続設定 ---
+# 接続を初期化
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+def load_master():
+    try:
+        # masterシートを読み込み
+        return conn.read(worksheet="master")
+    except:
+        return pd.DataFrame(columns=["カテゴリー", "アイテム名", "単位①容量", "集計単位①", "入力単位②", "集計単位②", "換算数値"])
+
+def load_log():
+    try:
+        # logシートを読み込み
+        df = conn.read(worksheet="log")
+        if not df.empty and "日付" in df.columns:
+            df["日付"] = pd.to_datetime(df["日付"]).dt.date
+        return df
+    except:
+        return pd.DataFrame(columns=["日付", "車両番号", "種別", "アイテム名", "単位①数値", "単位②数値"])
+
+# データの読み込み
+df_master = load_master()
+df_log = load_log()
 
 # カテゴリーの定義
 CATEGORIES = [
@@ -13,25 +34,6 @@ CATEGORIES = [
     "サイド", "添付物", "ドリンク", "解凍物", "グッズその他", 
     "生地", "冷凍食材", "カートン", "その他包材", "厨房備品"
 ]
-
-def load_data(file_name, columns):
-    if os.path.exists(file_name):
-        try:
-            df = pd.read_csv(file_name)
-            for col in columns:
-                if col not in df.columns:
-                    df[col] = "未分類" if col == "カテゴリー" else (1.0 if "数値" in col or "容量" in col else "単位")
-            if "日付" in df.columns:
-                df["日付"] = pd.to_datetime(df["日付"]).dt.date
-            return df[columns]
-        except:
-            return pd.DataFrame(columns=columns)
-    else:
-        return pd.DataFrame(columns=columns)
-
-# マスターとログの読み込み（カテゴリー列を追加）
-df_master = load_data(MASTER_FILE, ["カテゴリー", "アイテム名", "単位①容量", "集計単位①", "入力単位②", "集計単位②", "換算数値"])
-df_log = load_data(LOG_FILE, ["日付", "車両番号", "種別", "アイテム名", "単位①数値", "単位②数値"])
 
 # --- 2. サイドバーメニュー ---
 st.sidebar.title("🚚 在庫・車両管理")
@@ -53,16 +55,13 @@ if page in ["積み込み", "追加", "積み下ろし", "ロス"]:
         with c_top2: car_id = st.text_input("車両番号", key=f"s_{page}")
 
         st.divider()
-        
-        # ヘッダー行
         h1, h2, h3, h4 = st.columns([1.2, 1, 1, 0.8])
         with h1: st.caption("アイテム名")
-        with h2: st.caption(f"単位①")
-        with h3: st.caption(f"単位②")
+        with h2: st.caption("単位①")
+        with h3: st.caption("単位②")
         with h4: st.caption("操作")
 
         input_list = []
-        # カテゴリーごとに表示
         for cat in df_master["カテゴリー"].unique():
             st.markdown(f"### {cat}")
             df_cat = df_master[df_master["カテゴリー"] == cat]
@@ -79,9 +78,9 @@ if page in ["積み込み", "追加", "積み下ろし", "ロス"]:
                         if st.button("登録", key=f"btn_{page}_{item}", use_container_width=True):
                             if not car_id: st.error("車両番号入力")
                             elif v1 > 0 or v2 > 0:
-                                new_data = pd.DataFrame([[input_date, car_id, page, item, v1, v2]], columns=df_log.columns)
-                                df_log = pd.concat([df_log, new_data], ignore_index=True)
-                                df_log.to_csv(LOG_FILE, index=False)
+                                new_row = pd.DataFrame([[input_date, car_id, page, item, v1, v2]], columns=df_log.columns)
+                                updated_log = pd.concat([df_log, new_row], ignore_index=True)
+                                conn.update(worksheet="log", data=updated_log)
                                 st.success(f"{item} 保存")
                                 st.rerun()
                     input_list.append({"item": item, "v1": v1, "v2": v2})
@@ -92,8 +91,9 @@ if page in ["積み込み", "追加", "積み下ろし", "ロス"]:
             else:
                 new_rows = [[input_date, car_id, page, d["item"], d["v1"], d["v2"]] for d in input_list if d["v1"] > 0 or d["v2"] > 0]
                 if new_rows:
-                    df_log = pd.concat([df_log, pd.DataFrame(new_rows, columns=df_log.columns)], ignore_index=True)
-                    df_log.to_csv(LOG_FILE, index=False)
+                    new_df = pd.DataFrame(new_rows, columns=df_log.columns)
+                    updated_log = pd.concat([df_log, new_df], ignore_index=True)
+                    conn.update(worksheet="log", data=updated_log)
                     st.success("一括保存完了")
                     st.rerun()
 
@@ -108,7 +108,6 @@ elif page == "最終集計":
             all_cars = ["すべて"] + sorted(df_log["車両番号"].unique().tolist())
             search_car = st.selectbox("車両番号で絞り込み", all_cars)
 
-        # フィルタリング
         mask = (df_log["日付"] >= start_d) & (df_log["日付"] <= end_d)
         if search_car != "すべて":
             mask = mask & (df_log["車両番号"] == search_car)
@@ -137,8 +136,6 @@ elif page == "最終集計":
                 return f"{prefix}{v1} {row['集計単位①']} + {v2} {row['集計単位②']}"
 
             res["現在在庫/差分"] = res.apply(fmt_res, axis=1)
-            
-            # カテゴリーごとにテーブル表示
             for cat in res["カテゴリー"].unique():
                 st.subheader(f"📁 {cat}")
                 st.table(res[res["カテゴリー"] == cat][["アイテム名", "現在在庫/差分"]])
@@ -164,8 +161,8 @@ elif page == "マスター管理":
         if st.form_submit_button("マスター登録"):
             if m_name:
                 new_m = pd.DataFrame([[m_cat, m_name, m_cap, m_u1, m_u2_in, m_u2_out, m_conv]], columns=df_master.columns)
-                df_master = pd.concat([df_master, new_m], ignore_index=True)
-                df_master.to_csv(MASTER_FILE, index=False)
+                updated_master = pd.concat([df_master, new_m], ignore_index=True)
+                conn.update(worksheet="master", data=updated_master)
                 st.success(f"{m_name}を登録しました")
                 st.rerun()
 
@@ -175,8 +172,8 @@ elif page == "マスター管理":
         st.dataframe(df_master, use_container_width=True)
         del_item = st.selectbox("削除するアイテムを選択", df_master["アイテム名"])
         if st.button("選択したアイテムを削除"):
-            df_master = df_master[df_master["アイテム名"] != del_item]
-            df_master.to_csv(MASTER_FILE, index=False)
+            updated_master = df_master[df_master["アイテム名"] != del_item]
+            conn.update(worksheet="master", data=updated_master)
             st.rerun()
 
 # --- 6. 履歴削除 ---
@@ -186,6 +183,6 @@ elif page == "データ履歴削除":
         st.dataframe(df_log, use_container_width=True)
         del_idx = st.number_input("削除したい行番号を入力", 0, len(df_log)-1, step=1)
         if st.button("行を削除する"):
-            df_log = df_log.drop(df_log.index[del_idx])
-            df_log.to_csv(LOG_FILE, index=False)
+            updated_log = df_log.drop(df_log.index[del_idx])
+            conn.update(worksheet="log", data=updated_log)
             st.rerun()
