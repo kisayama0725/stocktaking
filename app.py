@@ -4,23 +4,30 @@ from streamlit_gsheets import GSheetsConnection
 from datetime import datetime, date
 
 # --- 1. スプレッドシートへの接続設定 ---
-# 接続を初期化
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_master():
     try:
-        # masterシートを読み込み
-        return conn.read(worksheet="master")
+        # ttl=0 を追加してキャッシュを無効化し、常に最新を読み込む
+        df = conn.read(worksheet="master", ttl=0)
+        # 空の列が含まれるのを防ぐため、必要な列だけを抽出
+        cols = ["カテゴリー", "アイテム名", "単位①容量", "集計単位①", "入力単位②", "集計単位②", "換算数値"]
+        if not df.empty:
+            return df[cols].dropna(subset=["アイテム名"])
+        return pd.DataFrame(columns=cols)
     except:
         return pd.DataFrame(columns=["カテゴリー", "アイテム名", "単位①容量", "集計単位①", "入力単位②", "集計単位②", "換算数値"])
 
 def load_log():
     try:
-        # logシートを読み込み
-        df = conn.read(worksheet="log")
-        if not df.empty and "日付" in df.columns:
-            df["日付"] = pd.to_datetime(df["日付"]).dt.date
-        return df
+        df = conn.read(worksheet="log", ttl=0)
+        cols = ["日付", "車両番号", "種別", "アイテム名", "単位①数値", "単位②数値"]
+        if not df.empty:
+            df = df[cols]
+            if "日付" in df.columns:
+                df["日付"] = pd.to_datetime(df["日付"]).dt.date
+            return df
+        return pd.DataFrame(columns=cols)
     except:
         return pd.DataFrame(columns=["日付", "車両番号", "種別", "アイテム名", "単位①数値", "単位②数値"])
 
@@ -48,7 +55,7 @@ st.title(f"【{page}】")
 # --- 3. 入力画面 ---
 if page in ["積み込み", "追加", "積み下ろし", "ロス"]:
     if df_master.empty:
-        st.warning("先にマスター管理でアイテムを登録してください。")
+        st.warning("先にマスター管理でアイテムを登録してください。データが反映されない場合はページを再読み込みしてください。")
     else:
         c_top1, c_top2 = st.columns(2)
         with c_top1: input_date = st.date_input("日付", value=date.today(), key=f"d_{page}")
@@ -78,7 +85,9 @@ if page in ["積み込み", "追加", "積み下ろし", "ロス"]:
                         if st.button("登録", key=f"btn_{page}_{item}", use_container_width=True):
                             if not car_id: st.error("車両番号入力")
                             elif v1 > 0 or v2 > 0:
-                                new_row = pd.DataFrame([[input_date, car_id, page, item, v1, v2]], columns=df_log.columns)
+                                # 列名を直接指定して作成
+                                new_row = pd.DataFrame([[input_date, car_id, page, item, v1, v2]], 
+                                                       columns=["日付", "車両番号", "種別", "アイテム名", "単位①数値", "単位②数値"])
                                 updated_log = pd.concat([df_log, new_row], ignore_index=True)
                                 conn.update(worksheet="log", data=updated_log)
                                 st.success(f"{item} 保存")
@@ -91,7 +100,7 @@ if page in ["積み込み", "追加", "積み下ろし", "ロス"]:
             else:
                 new_rows = [[input_date, car_id, page, d["item"], d["v1"], d["v2"]] for d in input_list if d["v1"] > 0 or d["v2"] > 0]
                 if new_rows:
-                    new_df = pd.DataFrame(new_rows, columns=df_log.columns)
+                    new_df = pd.DataFrame(new_rows, columns=["日付", "車両番号", "種別", "アイテム名", "単位①数値", "単位②数値"])
                     updated_log = pd.concat([df_log, new_df], ignore_index=True)
                     conn.update(worksheet="log", data=updated_log)
                     st.success("一括保存完了")
@@ -115,7 +124,9 @@ elif page == "最終集計":
         df_f = df_log.loc[mask]
 
         if not df_f.empty:
-            df_c = pd.merge(df_f, df_master, on="アイテム名")
+            # マスターを再読み込みして結合
+            current_master = load_master()
+            df_c = pd.merge(df_f, current_master, on="アイテム名")
             
             def calc_stock_pcs(row):
                 conv_unit2 = row["単位②数値"] / row["換算数値"]
@@ -139,8 +150,6 @@ elif page == "最終集計":
             for cat in res["カテゴリー"].unique():
                 st.subheader(f"📁 {cat}")
                 st.table(res[res["カテゴリー"] == cat][["アイテム名", "現在在庫/差分"]])
-        else:
-            st.warning("条件に一致するデータがありません")
     else:
         st.info("データがありません")
 
@@ -160,10 +169,12 @@ elif page == "マスター管理":
         
         if st.form_submit_button("マスター登録"):
             if m_name:
-                new_m = pd.DataFrame([[m_cat, m_name, m_cap, m_u1, m_u2_in, m_u2_out, m_conv]], columns=df_master.columns)
+                # 列名を直接指定して作成
+                new_m = pd.DataFrame([[m_cat, m_name, m_cap, m_u1, m_u2_in, m_u2_out, m_conv]], 
+                                     columns=["カテゴリー", "アイテム名", "単位①容量", "集計単位①", "入力単位②", "集計単位②", "換算数値"])
                 updated_master = pd.concat([df_master, new_m], ignore_index=True)
                 conn.update(worksheet="master", data=updated_master)
-                st.success(f"{m_name}を登録しました")
+                st.success(f"{m_name}を登録しました。反映されない場合はリロードしてください。")
                 st.rerun()
 
     st.divider()
